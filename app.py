@@ -1,9 +1,11 @@
 import json
+import re
 from pathlib import Path
 
 import streamlit as st
 
-DATA_FILE = Path(__file__).parent / "swot_johari_data.json"
+DATA_DIR = Path(__file__).parent / "user_data"
+DATA_DIR.mkdir(exist_ok=True)
 
 JOHARI_WORDS = [
     "able", "accepting", "adaptable", "bold", "brave", "calm", "caring", "cheerful",
@@ -24,25 +26,49 @@ def default_data():
     }
 
 
-def load_data():
-    if DATA_FILE.exists():
-        return json.loads(DATA_FILE.read_text())
+def slugify(name):
+    """Turn a display name into a safe filename, e.g. 'Harsh G.' -> 'harsh-g'."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug or "guest"
+
+
+def data_path(slug):
+    return DATA_DIR / f"{slug}.json"
+
+
+def load_data(slug):
+    path = data_path(slug)
+    if path.exists():
+        return json.loads(path.read_text())
     return default_data()
 
 
-def save_data(data):
-    DATA_FILE.write_text(json.dumps(data, indent=2))
+def save_data(slug, data):
+    data_path(slug).write_text(json.dumps(data, indent=2))
 
-
-# st.session_state persists values across reruns (Streamlit reruns the whole
-# script top-to-bottom on every interaction). We only want to read the file
-# once per browser session, so we guard it behind an "if not already loaded".
-if "data" not in st.session_state:
-    st.session_state.data = load_data()
-
-data = st.session_state.data
 
 st.set_page_config(page_title="My SWOT & Johari Window", layout="wide")
+
+# Everyone sharing this deployed link would otherwise read/write the same
+# file. Gating on a name (stored per-slug) keeps each visitor's board
+# separate without needing real accounts — good enough for a small trusted
+# group, not real authentication (anyone who types the same name sees it).
+if "user_slug" not in st.session_state:
+    st.title("Know Yourself")
+    st.caption("A personal SWOT Analysis & Johari Window, built with Streamlit.")
+    st.write("Enter your name to start (or re-enter it later to come back to your own board).")
+    entered_name = st.text_input("Your name")
+    if st.button("Start") and entered_name.strip():
+        slug = slugify(entered_name)
+        st.session_state.user_slug = slug
+        st.session_state.data = load_data(slug)
+        st.session_state.data["name"] = entered_name.strip()
+        save_data(slug, st.session_state.data)
+        st.rerun()
+    st.stop()
+
+user_slug = st.session_state.user_slug
+data = st.session_state.data
 
 
 def render_note_list(items, key_prefix, placeholder):
@@ -52,7 +78,7 @@ def render_note_list(items, key_prefix, placeholder):
         col_text.write(f"- {item}")
         if col_remove.button("✕", key=f"del_{key_prefix}_{idx}"):
             items.pop(idx)
-            save_data(data)
+            save_data(user_slug, data)
             st.rerun()
 
     # clear_on_submit=True empties the text box after Add is pressed.
@@ -63,7 +89,7 @@ def render_note_list(items, key_prefix, placeholder):
         )
         if st.form_submit_button("Add") and new_item.strip():
             items.append(new_item.strip())
-            save_data(data)
+            save_data(user_slug, data)
             st.rerun()
 
 
@@ -75,13 +101,8 @@ def render_swot_quadrant(col, key, emoji, title, hint, singular):
         render_note_list(data["swot"][key], f"swot_{key}", f"Add {article} {singular}…")
 
 
-st.title("Know Yourself")
+st.title(f"Know Yourself — {data['name']}" if data["name"] else "Know Yourself")
 st.caption("A personal SWOT Analysis & Johari Window, built with Streamlit.")
-
-name = st.text_input("Your name (optional)", value=data["name"])
-if name != data["name"]:
-    data["name"] = name
-    save_data(data)
 
 tab_swot, tab_johari = st.tabs(["SWOT Analysis", "Johari Window"])
 
@@ -115,7 +136,7 @@ with tab_johari:
         for word in list(data["johari"]["classification"]):
             if word not in selected:
                 del data["johari"]["classification"][word]
-        save_data(data)
+        save_data(user_slug, data)
 
     st.subheader("2. Sort your selected traits")
     open_words = st.multiselect(
@@ -127,7 +148,7 @@ with tab_johari:
     current = {w: ("open" if w in open_words else "hidden") for w in selected}
     if current != {w: data["johari"]["classification"].get(w) for w in selected}:
         data["johari"]["classification"].update(current)
-        save_data(data)
+        save_data(user_slug, data)
 
     st.subheader("3. Blind spot")
     st.caption("Feedback you've received (or suspect) about yourself that surprised you.")
@@ -155,9 +176,14 @@ with tab_johari:
         st.write(", ".join(data["johari"]["unknown"]) or "Nothing yet.")
 
 with st.sidebar:
-    st.caption("Data auto-saves to swot_johari_data.json next to this script.")
+    st.caption(f"Signed in as **{data['name']}**. Data auto-saves under this name only.")
+    if st.button("Switch name / start over"):
+        del st.session_state["user_slug"]
+        del st.session_state["data"]
+        st.rerun()
     confirm = st.checkbox("I want to clear all my data")
     if confirm and st.button("Reset everything"):
         st.session_state.data = default_data()
-        save_data(st.session_state.data)
+        st.session_state.data["name"] = data["name"]
+        save_data(user_slug, st.session_state.data)
         st.rerun()
